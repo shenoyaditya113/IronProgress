@@ -15,6 +15,7 @@ const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const checkingRedirectRef = useRef(false);
   const forceSignInStartedRef = useRef(false);
   
   // Logging State
@@ -27,17 +28,32 @@ const App: React.FC = () => {
   
   // Auth + session loading
   useEffect(() => {
-    // Handle redirect sign-in result (if we were redirected back from Google).
-    getRedirectResult(auth).catch((e) => {
-      console.error(e);
-      setAuthError(e?.message ?? 'Authentication failed.');
-    });
+    // First, check if we're returning from a redirect sign-in
+    if (!checkingRedirectRef.current) {
+      checkingRedirectRef.current = true;
+      getRedirectResult(auth)
+        .then((result) => {
+          // If we got a redirect result, onAuthStateChanged will fire next
+          if (result) {
+            console.log('Redirect sign-in successful');
+          }
+        })
+        .catch((e) => {
+          console.error('Redirect result error:', e);
+          // Only set error if it's not a "no redirect" case
+          if (e?.code !== 'auth/no-auth-event') {
+            setAuthError(e?.message ?? 'Authentication failed.');
+          }
+        });
 
-    const unsub = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setAuthReady(true);
-    });
-    return () => unsub();
+      // Set up auth state listener (runs regardless of redirect result)
+      const unsub = onAuthStateChanged(auth, (u) => {
+        setUser(u);
+        setAuthReady(true);
+      });
+      
+      return () => unsub();
+    }
   }, []);
 
   useEffect(() => {
@@ -53,16 +69,36 @@ const App: React.FC = () => {
   }, [user, authReady]);
 
   // Force sign-in (redirect flow) so popup blockers can't break auth.
+  // Only trigger if auth is ready, no user, and we haven't started a redirect yet
   useEffect(() => {
     if (!authReady) return;
-    if (user) return;
+    if (user) {
+      // Reset flags when user signs in successfully
+      forceSignInStartedRef.current = false;
+      checkingRedirectRef.current = false;
+      return;
+    }
     if (forceSignInStartedRef.current) return;
+    
+    // Check if we're in the middle of a redirect (URL might have auth params)
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.has('apiKey') || window.location.hash.includes('auth')) {
+      // We're processing a redirect, don't trigger another one
+      return;
+    }
 
-    forceSignInStartedRef.current = true;
-    signInWithRedirect(auth, googleProvider).catch((e) => {
-      console.error(e);
-      setAuthError(e?.message ?? 'Authentication failed.');
-    });
+    // Small delay to ensure redirect check completes
+    const timeoutId = setTimeout(() => {
+      if (user) return; // Double-check user didn't sign in during delay
+      forceSignInStartedRef.current = true;
+      signInWithRedirect(auth, googleProvider).catch((e) => {
+        console.error('Sign-in redirect error:', e);
+        setAuthError(e?.message ?? 'Authentication failed.');
+        forceSignInStartedRef.current = false; // Reset on error so user can retry
+      });
+    }, 500);
+
+    return () => clearTimeout(timeoutId);
   }, [authReady, user]);
 
   const previousWorkout = useMemo(() => {
