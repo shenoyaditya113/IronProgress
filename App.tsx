@@ -16,6 +16,7 @@ const App: React.FC = () => {
   const [exerciseName, setExerciseName] = useState('');
   const [sets, setSets] = useState<SetData[]>([{ weight: 0, reps: 0 }]);
   const [rating, setRating] = useState(3);
+  const [workoutDate, setWorkoutDate] = useState<string>(new Date().toISOString().split('T')[0]);
   
   // Load sessions from DB on mount
   useEffect(() => {
@@ -51,18 +52,23 @@ const App: React.FC = () => {
       return;
     }
 
+    // Convert workoutDate (YYYY-MM-DD) to ISO string with time set to start of day
+    const selectedDate = new Date(workoutDate);
+    selectedDate.setHours(0, 0, 0, 0);
+    const dateISOString = selectedDate.toISOString();
+
     const newExercise: ExerciseEntry = {
       id: Math.random().toString(36).substr(2, 9),
       name: exerciseName,
       muscleGroup: currentMuscle,
       sets: sets,
-      date: new Date().toISOString(),
+      date: dateISOString,
       rating: rating
     };
 
     const newSession: WorkoutSession = {
       id: Math.random().toString(36).substr(2, 9),
-      date: new Date().toISOString(),
+      date: dateISOString,
       exercises: [newExercise],
       totalVolume: sets.reduce((a, b) => a + (b.weight * b.reps), 0),
       rating: rating
@@ -76,6 +82,7 @@ const App: React.FC = () => {
     setExerciseName('');
     setSets([{ weight: 0, reps: 0 }]);
     setRating(3);
+    setWorkoutDate(new Date().toISOString().split('T')[0]);
   };
 
   const streakCount = useMemo(() => {
@@ -131,6 +138,20 @@ const App: React.FC = () => {
       {activeTab === 'log' && (
         <div className="space-y-6">
           <h2 className="text-xl font-bold">Log Workout</h2>
+          
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-slate-500 uppercase">Workout Date</label>
+            <input 
+              type="date" 
+              value={workoutDate}
+              onChange={(e) => setWorkoutDate(e.target.value)}
+              max={new Date().toISOString().split('T')[0]}
+              className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            {workoutDate !== new Date().toISOString().split('T')[0] && (
+              <p className="text-[10px] text-amber-400 italic">Adding workout for a past date</p>
+            )}
+          </div>
           
           <div className="space-y-2">
             <label className="text-xs font-bold text-slate-500 uppercase">Muscle Group</label>
