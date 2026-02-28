@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { MuscleGroup, WorkoutSession, ExerciseEntry, SetData } from './types';
 import { MUSCLE_GROUPS } from './constants';
 import Layout from './components/Layout';
@@ -7,13 +7,15 @@ import StreakCalendar from './components/StreakCalendar';
 import ProgressChart from './components/ProgressChart';
 import { cloudDb } from './cloudDb';
 import { auth, googleProvider } from './firebase';
-import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
+import { getRedirectResult, onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut, User } from 'firebase/auth';
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'home' | 'log' | 'stats' | 'history'>('home');
   const [sessions, setSessions] = useState<WorkoutSession[]>([]);
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const forceSignInStartedRef = useRef(false);
   
   // Logging State
   const [currentMuscle, setCurrentMuscle] = useState<MuscleGroup>(MuscleGroup.Chest);
@@ -25,6 +27,12 @@ const App: React.FC = () => {
   
   // Auth + session loading
   useEffect(() => {
+    // Handle redirect sign-in result (if we were redirected back from Google).
+    getRedirectResult(auth).catch((e) => {
+      console.error(e);
+      setAuthError(e?.message ?? 'Authentication failed.');
+    });
+
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u);
       setAuthReady(true);
@@ -43,6 +51,19 @@ const App: React.FC = () => {
     // Firebase-only mode: no local fallback
     setSessions([]);
   }, [user, authReady]);
+
+  // Force sign-in (redirect flow) so popup blockers can't break auth.
+  useEffect(() => {
+    if (!authReady) return;
+    if (user) return;
+    if (forceSignInStartedRef.current) return;
+
+    forceSignInStartedRef.current = true;
+    signInWithRedirect(auth, googleProvider).catch((e) => {
+      console.error(e);
+      setAuthError(e?.message ?? 'Authentication failed.');
+    });
+  }, [authReady, user]);
 
   const previousWorkout = useMemo(() => {
     // When editing, exclude the session being edited so "Previous Stats" doesn't show itself.
@@ -91,10 +112,20 @@ const App: React.FC = () => {
 
   const handleSignIn = async () => {
     try {
+      setAuthError(null);
+      // Try popup first (nice UX), then fall back to redirect if blocked.
       await signInWithPopup(auth, googleProvider);
     } catch (e) {
       console.error(e);
-      alert('Google sign-in failed. Make sure Google provider is enabled in Firebase Auth.');
+      // Common failures: popup blocked/closed, unauthorized domain, provider not enabled.
+      // Redirect flow is more reliable across browsers.
+      try {
+        await signInWithRedirect(auth, googleProvider);
+      } catch (e2) {
+        console.error(e2);
+        setAuthError((e2 as any)?.message ?? (e as any)?.message ?? 'Google sign-in failed.');
+        alert('Google sign-in failed. Make sure Google provider is enabled in Firebase Auth and your domain is authorized.');
+      }
     }
   };
 
@@ -249,6 +280,20 @@ const App: React.FC = () => {
         ) : null
       }
     >
+      {!user && authReady && (
+        <div className="glass-panel rounded-2xl p-4 border border-white/10 mb-4">
+          <p className="text-sm font-bold text-slate-200">Signing you in…</p>
+          <p className="text-xs text-slate-400 mt-1">
+            This app requires Google sign-in to use Firebase storage.
+          </p>
+          {authError && (
+            <p className="text-xs text-rose-300 mt-2 break-words">
+              Auth error: {authError}
+            </p>
+          )}
+        </div>
+      )}
+
       {activeTab === 'home' && (
         <div className="space-y-6">
           <div className="flex justify-between items-center bg-gradient-to-br from-blue-500 to-emerald-500 rounded-2xl p-6 shadow-lg">
