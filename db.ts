@@ -14,6 +14,23 @@ export const db = {
     localStorage.setItem(DB_KEY, JSON.stringify([...sessions, session]));
   },
 
+  updateSession: (sessionId: string, updatedSession: WorkoutSession): boolean => {
+    const sessions = db.getSessions();
+    const idx = sessions.findIndex(s => s.id === sessionId);
+    if (idx === -1) return false;
+    sessions[idx] = updatedSession;
+    localStorage.setItem(DB_KEY, JSON.stringify(sessions));
+    return true;
+  },
+
+  deleteSession: (sessionId: string): boolean => {
+    const sessions = db.getSessions();
+    const next = sessions.filter(s => s.id !== sessionId);
+    if (next.length === sessions.length) return false;
+    localStorage.setItem(DB_KEY, JSON.stringify(next));
+    return true;
+  },
+
   getPreviousWorkoutForMuscle: (muscle: MuscleGroup): ExerciseEntry | null => {
     const sessions = db.getSessions().sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     for (const session of sessions) {

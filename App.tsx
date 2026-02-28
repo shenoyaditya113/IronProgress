@@ -1,15 +1,20 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { MuscleGroup, WorkoutSession, ExerciseEntry, SetData } from './types';
-import { db } from './db';
+import { db as localDb } from './db';
 import { MUSCLE_GROUPS } from './constants';
 import Layout from './components/Layout';
 import StreakCalendar from './components/StreakCalendar';
 import ProgressChart from './components/ProgressChart';
+import { cloudDb } from './cloudDb';
+import { auth, googleProvider } from './firebase';
+import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'home' | 'log' | 'stats' | 'history'>('home');
   const [sessions, setSessions] = useState<WorkoutSession[]>([]);
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   
   // Logging State
   const [currentMuscle, setCurrentMuscle] = useState<MuscleGroup>(MuscleGroup.Chest);
@@ -17,15 +22,46 @@ const App: React.FC = () => {
   const [sets, setSets] = useState<SetData[]>([{ weight: 0, reps: 0 }]);
   const [rating, setRating] = useState(3);
   const [workoutDate, setWorkoutDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   
-  // Load sessions from DB on mount
+  // Auth + session loading
   useEffect(() => {
-    setSessions(db.getSessions());
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setAuthReady(true);
+    });
+    return () => unsub();
   }, []);
 
+  useEffect(() => {
+    if (!authReady) return;
+
+    if (user) {
+      const unsub = cloudDb.subscribeSessions(user.uid, setSessions);
+      return () => unsub();
+    }
+
+    // Local fallback when signed out
+    setSessions(localDb.getSessions());
+  }, [user, authReady]);
+
   const previousWorkout = useMemo(() => {
-    return db.getPreviousWorkoutForMuscle(currentMuscle);
-  }, [currentMuscle, sessions]);
+    // When editing, exclude the session being edited so "Previous Stats" doesn't show itself.
+    const sorted = sessions
+      .filter(s => s.id !== editingSessionId)
+      .slice()
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+    for (const session of sorted) {
+      const exercise = session.exercises.find(e => e.muscleGroup === currentMuscle);
+      if (exercise) return exercise;
+    }
+    return null;
+  }, [currentMuscle, sessions, editingSessionId]);
+
+  const sortedSessions = useMemo(() => {
+    return sessions.slice().sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [sessions]);
 
   const calculateAutoRating = (newSets: SetData[], prev: ExerciseEntry | null) => {
     if (!prev) return 3;
@@ -46,7 +82,62 @@ const App: React.FC = () => {
     setRating(calculateAutoRating(newSets, previousWorkout));
   };
 
-  const handleSaveWorkout = () => {
+  const resetLogForm = () => {
+    setExerciseName('');
+    setSets([{ weight: 0, reps: 0 }]);
+    setRating(3);
+    setWorkoutDate(new Date().toISOString().split('T')[0]);
+    setEditingSessionId(null);
+  };
+
+  const handleSignIn = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (e) {
+      console.error(e);
+      alert('Google sign-in failed. Make sure Google provider is enabled in Firebase Auth.');
+    }
+  };
+
+  const handleSignOut = async () => {
+    await signOut(auth);
+    resetLogForm();
+    setActiveTab('home');
+  };
+
+  const startEditSession = (session: WorkoutSession) => {
+    const ex = session.exercises[0];
+    setEditingSessionId(session.id);
+    setWorkoutDate(new Date(session.date).toISOString().split('T')[0]);
+    setCurrentMuscle(ex.muscleGroup);
+    setExerciseName(ex.name);
+    setSets(ex.sets);
+    setRating(session.rating);
+    setActiveTab('log');
+  };
+
+  const deleteSession = (session: WorkoutSession) => {
+    const ex = session.exercises[0];
+    const ok = confirm(`Delete this session?\n\n${ex.name} • ${new Date(session.date).toLocaleDateString()}`);
+    if (!ok) return;
+
+    // If you're currently editing this one, exit edit mode.
+    if (editingSessionId === session.id) {
+      resetLogForm();
+    }
+
+    if (user) {
+      cloudDb.deleteSession(user.uid, session.id).catch((e) => {
+        console.error(e);
+        alert('Failed to delete session.');
+      });
+    } else {
+      localDb.deleteSession(session.id);
+      setSessions(localDb.getSessions());
+    }
+  };
+
+  const handleSaveWorkout = async () => {
     if (!exerciseName || sets.some(s => s.reps === 0)) {
       alert("Please enter exercise name and all reps");
       return;
@@ -56,6 +147,45 @@ const App: React.FC = () => {
     const selectedDate = new Date(workoutDate);
     selectedDate.setHours(0, 0, 0, 0);
     const dateISOString = selectedDate.toISOString();
+
+    const totalVolume = sets.reduce((a, b) => a + (b.weight * b.reps), 0);
+
+    if (editingSessionId) {
+      const existing = sessions.find(s => s.id === editingSessionId);
+      if (!existing) {
+        alert("Couldn't find the session to edit. Please try again.");
+        setEditingSessionId(null);
+        return;
+      }
+
+      const existingExercise = existing.exercises[0];
+      const updatedExercise: ExerciseEntry = {
+        ...existingExercise,
+        name: exerciseName,
+        muscleGroup: currentMuscle,
+        sets: sets,
+        date: dateISOString,
+        rating: rating
+      };
+
+      const updatedSession: WorkoutSession = {
+        ...existing,
+        date: dateISOString,
+        exercises: [updatedExercise],
+        totalVolume,
+        rating
+      };
+
+      if (user) {
+        await cloudDb.updateSession(user.uid, updatedSession);
+      } else {
+        localDb.updateSession(existing.id, updatedSession);
+        setSessions(localDb.getSessions());
+      }
+      setActiveTab('history');
+      resetLogForm();
+      return;
+    }
 
     const newExercise: ExerciseEntry = {
       id: Math.random().toString(36).substr(2, 9),
@@ -70,19 +200,18 @@ const App: React.FC = () => {
       id: Math.random().toString(36).substr(2, 9),
       date: dateISOString,
       exercises: [newExercise],
-      totalVolume: sets.reduce((a, b) => a + (b.weight * b.reps), 0),
+      totalVolume,
       rating: rating
     };
 
-    db.saveSession(newSession);
-    setSessions(db.getSessions());
+    if (user) {
+      await cloudDb.saveSession(user.uid, newSession);
+    } else {
+      localDb.saveSession(newSession);
+      setSessions(localDb.getSessions());
+    }
     setActiveTab('home');
-    
-    // Reset form
-    setExerciseName('');
-    setSets([{ weight: 0, reps: 0 }]);
-    setRating(3);
-    setWorkoutDate(new Date().toISOString().split('T')[0]);
+    resetLogForm();
   };
 
   const streakCount = useMemo(() => {
@@ -100,7 +229,34 @@ const App: React.FC = () => {
   }, [sessions]);
 
   return (
-    <Layout activeTab={activeTab} setActiveTab={setActiveTab}>
+    <Layout
+      activeTab={activeTab}
+      setActiveTab={setActiveTab}
+      headerRight={
+        authReady ? (
+          user ? (
+            <div className="flex items-center gap-2">
+              <span className="hidden sm:inline text-[10px] text-slate-400 font-bold max-w-[140px] truncate">
+                {user.email ?? 'Signed in'}
+              </span>
+              <button
+                onClick={handleSignOut}
+                className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-2 rounded-xl font-black uppercase"
+              >
+                Sign out
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={handleSignIn}
+              className="text-[10px] bg-blue-500 hover:bg-blue-600 text-white px-3 py-2 rounded-xl font-black uppercase"
+            >
+              Sign in
+            </button>
+          )
+        ) : null
+      }
+    >
       {activeTab === 'home' && (
         <div className="space-y-6">
           <div className="flex justify-between items-center bg-gradient-to-br from-blue-500 to-emerald-500 rounded-2xl p-6 shadow-lg">
@@ -117,7 +273,7 @@ const App: React.FC = () => {
 
           <div className="space-y-4">
             <h3 className="text-lg font-bold text-slate-300">Recent Sessions</h3>
-            {sessions.slice(-3).reverse().map(s => (
+            {sortedSessions.slice(0, 3).map(s => (
               <div key={s.id} className="glass-panel rounded-xl p-4 flex justify-between items-center">
                 <div>
                   <p className="font-bold">{s.exercises[0].name}</p>
@@ -249,8 +405,17 @@ const App: React.FC = () => {
             onClick={handleSaveWorkout}
             className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-black p-4 rounded-2xl shadow-lg transition-transform active:scale-95"
           >
-            COMPLETE SESSION
+            {editingSessionId ? 'UPDATE SESSION' : 'COMPLETE SESSION'}
           </button>
+
+          {editingSessionId && (
+            <button
+              onClick={resetLogForm}
+              className="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold p-3 rounded-2xl transition-transform active:scale-95"
+            >
+              Cancel Edit
+            </button>
+          )}
         </div>
       )}
 
@@ -302,15 +467,29 @@ const App: React.FC = () => {
               <p>No workouts yet. Push some iron!</p>
             </div>
           ) : (
-            sessions.slice().reverse().map(s => (
+            sortedSessions.map(s => (
               <div key={s.id} className="glass-panel rounded-2xl p-4 border-l-4 border-blue-500">
                 <div className="flex justify-between items-start mb-2">
                   <div>
                     <h4 className="font-bold text-slate-100">{s.exercises[0].name}</h4>
                     <span className="text-[10px] font-bold uppercase text-blue-400">{s.exercises[0].muscleGroup}</span>
                   </div>
-                  <div className="text-right">
-                    <span className="text-[10px] text-slate-500 font-bold">{new Date(s.date).toLocaleDateString()}</span>
+                  <div className="text-right space-y-2">
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        onClick={() => startEditSession(s)}
+                        className="text-[10px] bg-blue-500/20 text-blue-300 px-2 py-1 rounded font-bold uppercase"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => deleteSession(s)}
+                        className="text-[10px] bg-rose-500/20 text-rose-300 px-2 py-1 rounded font-bold uppercase"
+                      >
+                        Delete
+                      </button>
+                      <span className="text-[10px] text-slate-500 font-bold">{new Date(s.date).toLocaleDateString()}</span>
+                    </div>
                     <div className="flex text-xs text-amber-400">
                       {Array.from({ length: s.rating }).map((_, i) => <span key={i}>★</span>)}
                     </div>

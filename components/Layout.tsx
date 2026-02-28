@@ -6,15 +6,19 @@ interface LayoutProps {
   children: React.ReactNode;
   activeTab: 'home' | 'log' | 'stats' | 'history';
   setActiveTab: (tab: 'home' | 'log' | 'stats' | 'history') => void;
+  headerRight?: React.ReactNode;
 }
 
-const Layout: React.FC<LayoutProps> = ({ children, activeTab, setActiveTab }) => {
+const Layout: React.FC<LayoutProps> = ({ children, activeTab, setActiveTab, headerRight }) => {
   return (
     <div className="flex flex-col min-h-screen max-w-lg mx-auto bg-slate-950 shadow-2xl overflow-hidden relative">
       <header className="p-6 border-b border-white/10 glass-panel sticky top-0 z-40">
-        <h1 className="text-2xl font-extrabold tracking-tight bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">
-          IRON PROGRESS
-        </h1>
+        <div className="flex items-center justify-between gap-3">
+          <h1 className="text-2xl font-extrabold tracking-tight bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">
+            IRON PROGRESS
+          </h1>
+          {headerRight && <div className="shrink-0">{headerRight}</div>}
+        </div>
       </header>
 
       <main className="flex-1 overflow-y-auto p-4 pb-24 hide-scrollbar">
