@@ -1,7 +1,6 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { MuscleGroup, WorkoutSession, ExerciseEntry, SetData } from './types';
-import { db as localDb } from './db';
 import { MUSCLE_GROUPS } from './constants';
 import Layout from './components/Layout';
 import StreakCalendar from './components/StreakCalendar';
@@ -41,8 +40,8 @@ const App: React.FC = () => {
       return () => unsub();
     }
 
-    // Local fallback when signed out
-    setSessions(localDb.getSessions());
+    // Firebase-only mode: no local fallback
+    setSessions([]);
   }, [user, authReady]);
 
   const previousWorkout = useMemo(() => {
@@ -117,6 +116,10 @@ const App: React.FC = () => {
   };
 
   const deleteSession = (session: WorkoutSession) => {
+    if (!user) {
+      alert('Please sign in to manage your workouts.');
+      return;
+    }
     const ex = session.exercises[0];
     const ok = confirm(`Delete this session?\n\n${ex.name} • ${new Date(session.date).toLocaleDateString()}`);
     if (!ok) return;
@@ -126,18 +129,17 @@ const App: React.FC = () => {
       resetLogForm();
     }
 
-    if (user) {
-      cloudDb.deleteSession(user.uid, session.id).catch((e) => {
-        console.error(e);
-        alert('Failed to delete session.');
-      });
-    } else {
-      localDb.deleteSession(session.id);
-      setSessions(localDb.getSessions());
-    }
+    cloudDb.deleteSession(user.uid, session.id).catch((e) => {
+      console.error(e);
+      alert('Failed to delete session.');
+    });
   };
 
   const handleSaveWorkout = async () => {
+    if (!user) {
+      alert('Please sign in to save workouts to the cloud.');
+      return;
+    }
     if (!exerciseName || sets.some(s => s.reps === 0)) {
       alert("Please enter exercise name and all reps");
       return;
@@ -176,12 +178,7 @@ const App: React.FC = () => {
         rating
       };
 
-      if (user) {
-        await cloudDb.updateSession(user.uid, updatedSession);
-      } else {
-        localDb.updateSession(existing.id, updatedSession);
-        setSessions(localDb.getSessions());
-      }
+      await cloudDb.updateSession(user.uid, updatedSession);
       setActiveTab('history');
       resetLogForm();
       return;
@@ -204,12 +201,7 @@ const App: React.FC = () => {
       rating: rating
     };
 
-    if (user) {
-      await cloudDb.saveSession(user.uid, newSession);
-    } else {
-      localDb.saveSession(newSession);
-      setSessions(localDb.getSessions());
-    }
+    await cloudDb.saveSession(user.uid, newSession);
     setActiveTab('home');
     resetLogForm();
   };
@@ -403,10 +395,19 @@ const App: React.FC = () => {
 
           <button 
             onClick={handleSaveWorkout}
-            className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-black p-4 rounded-2xl shadow-lg transition-transform active:scale-95"
+            disabled={!user}
+            className={`w-full font-black p-4 rounded-2xl shadow-lg transition-transform active:scale-95 ${
+              user ? 'bg-emerald-500 hover:bg-emerald-600 text-white' : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+            }`}
           >
             {editingSessionId ? 'UPDATE SESSION' : 'COMPLETE SESSION'}
           </button>
+
+          {!user && (
+            <p className="text-center text-[10px] text-amber-400 italic">
+              Sign in to save workouts to Firebase.
+            </p>
+          )}
 
           {editingSessionId && (
             <button
