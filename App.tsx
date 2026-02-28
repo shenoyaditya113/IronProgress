@@ -23,6 +23,7 @@ const App: React.FC = () => {
   const [rating, setRating] = useState(3);
   const [workoutDate, setWorkoutDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [currentSessionExercises, setCurrentSessionExercises] = useState<ExerciseEntry[]>([]);
   
   // Set up auth state listener - SINGLE SOURCE OF TRUTH
   useEffect(() => {
@@ -91,6 +92,7 @@ const App: React.FC = () => {
     setRating(3);
     setWorkoutDate(new Date().toISOString().split('T')[0]);
     setEditingSessionId(null);
+    setCurrentSessionExercises([]);
   };
 
   const handleSignIn = async () => {
@@ -118,6 +120,8 @@ const App: React.FC = () => {
     setExerciseName(ex.name);
     setSets(ex.sets);
     setRating(session.rating);
+    // Preserve any additional exercises in the session so they don't get lost on save
+    setCurrentSessionExercises(session.exercises.slice(1));
     setActiveTab('log');
   };
 
@@ -141,13 +145,9 @@ const App: React.FC = () => {
     });
   };
 
-  const handleSaveWorkout = async () => {
-    if (!user) {
-      alert('Please sign in to save workouts to the cloud.');
-      return;
-    }
+  const addExerciseToCurrentSession = () => {
     if (!exerciseName || sets.some(s => s.reps === 0)) {
-      alert("Please enter exercise name and all reps");
+      alert('Please enter exercise name and all reps before adding an exercise to the session');
       return;
     }
 
@@ -156,7 +156,56 @@ const App: React.FC = () => {
     selectedDate.setHours(0, 0, 0, 0);
     const dateISOString = selectedDate.toISOString();
 
-    const totalVolume = sets.reduce((a, b) => a + (b.weight * b.reps), 0);
+    const newExercise: ExerciseEntry = {
+      id: Math.random().toString(36).substr(2, 9),
+      name: exerciseName,
+      muscleGroup: currentMuscle,
+      sets: sets,
+      date: dateISOString,
+      rating: rating,
+    };
+
+    setCurrentSessionExercises(prev => [...prev, newExercise]);
+
+    // Reset form for next exercise while keeping date and muscle group
+    setExerciseName('');
+    setSets([{ weight: 0, reps: 0 }]);
+    setRating(3);
+  };
+
+  const handleSaveWorkout = async () => {
+    if (!user) {
+      alert('Please sign in to save workouts to the cloud.');
+      return;
+    }
+
+    // If there is no exercise yet and nothing typed, prevent empty session
+    if (!exerciseName && currentSessionExercises.length === 0) {
+      alert('Add at least one exercise to complete a session.');
+      return;
+    }
+
+    // Convert workoutDate (YYYY-MM-DD) to ISO string with time set to start of day
+    const selectedDate = new Date(workoutDate);
+    selectedDate.setHours(0, 0, 0, 0);
+    const dateISOString = selectedDate.toISOString();
+
+    // Build the \"current\" exercise from the form if it is filled
+    let currentExercise: ExerciseEntry | null = null;
+    if (exerciseName) {
+      if (sets.some(s => s.reps === 0)) {
+        alert('Please enter reps for all sets');
+        return;
+      }
+      currentExercise = {
+        id: Math.random().toString(36).substr(2, 9),
+        name: exerciseName,
+        muscleGroup: currentMuscle,
+        sets: sets,
+        date: dateISOString,
+        rating: rating,
+      };
+    }
 
     if (editingSessionId) {
       const existing = sessions.find(s => s.id === editingSessionId);
@@ -167,21 +216,34 @@ const App: React.FC = () => {
       }
 
       const existingExercise = existing.exercises[0];
-      const updatedExercise: ExerciseEntry = {
+      const updatedFirstExercise: ExerciseEntry = {
         ...existingExercise,
-        name: exerciseName,
+        name: exerciseName || existingExercise.name,
         muscleGroup: currentMuscle,
         sets: sets,
         date: dateISOString,
-        rating: rating
+        rating: rating,
       };
+
+      const updatedExercises: ExerciseEntry[] = [
+        updatedFirstExercise,
+        ...currentSessionExercises,
+      ];
+
+      const totalVolume = updatedExercises.reduce(
+        (acc, ex) => acc + ex.sets.reduce((a, b) => a + b.weight * b.reps, 0),
+        0
+      );
+      const sessionRating =
+        updatedExercises.reduce((acc, ex) => acc + ex.rating, 0) /
+        (updatedExercises.length || 1);
 
       const updatedSession: WorkoutSession = {
         ...existing,
         date: dateISOString,
-        exercises: [updatedExercise],
+        exercises: updatedExercises,
         totalVolume,
-        rating
+        rating: sessionRating,
       };
 
       await cloudDb.updateSession(user.uid, updatedSession);
@@ -190,21 +252,25 @@ const App: React.FC = () => {
       return;
     }
 
-    const newExercise: ExerciseEntry = {
-      id: Math.random().toString(36).substr(2, 9),
-      name: exerciseName,
-      muscleGroup: currentMuscle,
-      sets: sets,
-      date: dateISOString,
-      rating: rating
-    };
+    const allExercises: ExerciseEntry[] = [
+      ...currentSessionExercises,
+      ...(currentExercise ? [currentExercise] : []),
+    ];
+
+    const totalVolume = allExercises.reduce(
+      (acc, ex) => acc + ex.sets.reduce((a, b) => a + b.weight * b.reps, 0),
+      0
+    );
+    const sessionRating =
+      allExercises.reduce((acc, ex) => acc + ex.rating, 0) /
+      (allExercises.length || 1);
 
     const newSession: WorkoutSession = {
       id: Math.random().toString(36).substr(2, 9),
       date: dateISOString,
-      exercises: [newExercise],
+      exercises: allExercises,
       totalVolume,
-      rating: rating
+      rating: sessionRating,
     };
 
     await cloudDb.saveSession(user.uid, newSession);
@@ -412,6 +478,37 @@ const App: React.FC = () => {
                Rating is auto-suggested based on your volume growth compared to last time.
              </p>
           </div>
+
+          {!editingSessionId && (
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={addExerciseToCurrentSession}
+                className="w-full bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 font-bold p-3 rounded-2xl text-xs uppercase tracking-wide"
+              >
+                Add Exercise To Session
+              </button>
+              {currentSessionExercises.length > 0 && (
+                <div className="glass-panel rounded-2xl p-3 border border-blue-500/30">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase mb-2">
+                    Exercises in this session ({currentSessionExercises.length})
+                  </p>
+                  <div className="space-y-1 max-h-32 overflow-y-auto text-xs">
+                    {currentSessionExercises.map((ex, idx) => (
+                      <div key={ex.id} className="flex justify-between items-center text-slate-300">
+                        <span className="truncate max-w-[55%]">
+                          {idx + 1}. {ex.name} ({ex.muscleGroup})
+                        </span>
+                        <span className="text-slate-500">
+                          {ex.sets.reduce((a, b) => a + b.weight * b.reps, 0)} kg
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           <button 
             onClick={handleSaveWorkout}
