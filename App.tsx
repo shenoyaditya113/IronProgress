@@ -1,5 +1,5 @@
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { MuscleGroup, WorkoutSession, ExerciseEntry, SetData } from './types';
 import { MUSCLE_GROUPS } from './constants';
 import Layout from './components/Layout';
@@ -7,7 +7,7 @@ import StreakCalendar from './components/StreakCalendar';
 import ProgressChart from './components/ProgressChart';
 import { cloudDb } from './cloudDb';
 import { auth, googleProvider } from './firebase';
-import { getRedirectResult, onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut, User } from 'firebase/auth';
+import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'home' | 'log' | 'stats' | 'history'>('home');
@@ -15,8 +15,6 @@ const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const redirectCheckedRef = useRef(false);
-  const redirectTriggeredRef = useRef(false);
   
   // Logging State
   const [currentMuscle, setCurrentMuscle] = useState<MuscleGroup>(MuscleGroup.Chest);
@@ -26,33 +24,12 @@ const App: React.FC = () => {
   const [workoutDate, setWorkoutDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   
-  // Set up auth state listener - this is the SINGLE SOURCE OF TRUTH
+  // Set up auth state listener - SINGLE SOURCE OF TRUTH
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (u) => {
+    const unsub = onAuthStateChanged(auth, (u) => {
       console.log('Auth state changed:', u ? `User: ${u.email}` : 'No user');
       setUser(u);
-      
-      // First time auth state is determined
-      if (!authReady) {
-        setAuthReady(true);
-        
-        // Check for redirect result ONLY once when auth becomes ready
-        if (!redirectCheckedRef.current) {
-          redirectCheckedRef.current = true;
-          try {
-            const result = await getRedirectResult(auth);
-            if (result) {
-              console.log('Redirect sign-in successful, user:', result.user.email);
-              // onAuthStateChanged will fire again with the user, so we don't need to do anything here
-            }
-          } catch (e: any) {
-            console.error('Redirect result error:', e);
-            if (e?.code !== 'auth/no-auth-event') {
-              setAuthError(e?.message ?? 'Authentication failed.');
-            }
-          }
-        }
-      }
+      setAuthReady(true);
     });
     
     return () => unsub();
@@ -70,45 +47,6 @@ const App: React.FC = () => {
     // Firebase-only mode: no local fallback
     setSessions([]);
   }, [user, authReady]);
-
-  // Force sign-in ONLY when auth is ready and user is null
-  // This effect runs AFTER onAuthStateChanged has determined there's no user
-  useEffect(() => {
-    // Don't do anything until auth state is determined
-    if (!authReady) return;
-    
-    // If user exists, reset redirect flag and don't trigger sign-in
-    if (user) {
-      redirectTriggeredRef.current = false;
-      return;
-    }
-    
-    // If we already triggered a redirect, don't trigger again
-    if (redirectTriggeredRef.current) {
-      console.log('Redirect already triggered, waiting...');
-      return;
-    }
-    
-    // Check if we're returning from a redirect (URL has auth params)
-    const urlParams = new URLSearchParams(window.location.search);
-    const hasAuthParams = urlParams.has('apiKey') || 
-                          window.location.hash.includes('auth') ||
-                          window.location.search.includes('__firebase');
-    
-    if (hasAuthParams) {
-      console.log('Detected redirect return, waiting for auth state...');
-      return;
-    }
-
-    // All checks passed - trigger redirect sign-in ONCE
-    console.log('No user found, triggering redirect sign-in...');
-    redirectTriggeredRef.current = true;
-    signInWithRedirect(auth, googleProvider).catch((e) => {
-      console.error('Sign-in redirect error:', e);
-      setAuthError(e?.message ?? 'Authentication failed.');
-      redirectTriggeredRef.current = false; // Reset on error so user can retry
-    });
-  }, [authReady, user]);
 
   const previousWorkout = useMemo(() => {
     // When editing, exclude the session being edited so "Previous Stats" doesn't show itself.
@@ -158,19 +96,11 @@ const App: React.FC = () => {
   const handleSignIn = async () => {
     try {
       setAuthError(null);
-      // Try popup first (nice UX), then fall back to redirect if blocked.
       await signInWithPopup(auth, googleProvider);
     } catch (e) {
       console.error(e);
-      // Common failures: popup blocked/closed, unauthorized domain, provider not enabled.
-      // Redirect flow is more reliable across browsers.
-      try {
-        await signInWithRedirect(auth, googleProvider);
-      } catch (e2) {
-        console.error(e2);
-        setAuthError((e2 as any)?.message ?? (e as any)?.message ?? 'Google sign-in failed.');
-        alert('Google sign-in failed. Make sure Google provider is enabled in Firebase Auth and your domain is authorized.');
-      }
+      setAuthError((e as any)?.message ?? 'Google sign-in failed.');
+      alert('Google sign-in failed. Check Firebase Auth (Google provider enabled, domain authorized).');
     }
   };
 
