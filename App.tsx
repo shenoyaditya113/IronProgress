@@ -15,8 +15,8 @@ const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const checkingRedirectRef = useRef(false);
-  const forceSignInStartedRef = useRef(false);
+  const redirectCheckedRef = useRef(false);
+  const redirectTriggeredRef = useRef(false);
   
   // Logging State
   const [currentMuscle, setCurrentMuscle] = useState<MuscleGroup>(MuscleGroup.Chest);
@@ -26,36 +26,39 @@ const App: React.FC = () => {
   const [workoutDate, setWorkoutDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   
-  // Auth + session loading
+  // Set up auth state listener - this is the SINGLE SOURCE OF TRUTH
   useEffect(() => {
-    // First, check if we're returning from a redirect sign-in
-    if (!checkingRedirectRef.current) {
-      checkingRedirectRef.current = true;
-      getRedirectResult(auth)
-        .then((result) => {
-          // If we got a redirect result, onAuthStateChanged will fire next
-          if (result) {
-            console.log('Redirect sign-in successful');
-          }
-        })
-        .catch((e) => {
-          console.error('Redirect result error:', e);
-          // Only set error if it's not a "no redirect" case
-          if (e?.code !== 'auth/no-auth-event') {
-            setAuthError(e?.message ?? 'Authentication failed.');
-          }
-        });
-
-      // Set up auth state listener (runs regardless of redirect result)
-      const unsub = onAuthStateChanged(auth, (u) => {
-        setUser(u);
-        setAuthReady(true);
-      });
+    const unsub = onAuthStateChanged(auth, async (u) => {
+      console.log('Auth state changed:', u ? `User: ${u.email}` : 'No user');
+      setUser(u);
       
-      return () => unsub();
-    }
-  }, []);
+      // First time auth state is determined
+      if (!authReady) {
+        setAuthReady(true);
+        
+        // Check for redirect result ONLY once when auth becomes ready
+        if (!redirectCheckedRef.current) {
+          redirectCheckedRef.current = true;
+          try {
+            const result = await getRedirectResult(auth);
+            if (result) {
+              console.log('Redirect sign-in successful, user:', result.user.email);
+              // onAuthStateChanged will fire again with the user, so we don't need to do anything here
+            }
+          } catch (e: any) {
+            console.error('Redirect result error:', e);
+            if (e?.code !== 'auth/no-auth-event') {
+              setAuthError(e?.message ?? 'Authentication failed.');
+            }
+          }
+        }
+      }
+    });
+    
+    return () => unsub();
+  }, [authReady]);
 
+  // Load sessions when user is available
   useEffect(() => {
     if (!authReady) return;
 
@@ -68,37 +71,43 @@ const App: React.FC = () => {
     setSessions([]);
   }, [user, authReady]);
 
-  // Force sign-in (redirect flow) so popup blockers can't break auth.
-  // Only trigger if auth is ready, no user, and we haven't started a redirect yet
+  // Force sign-in ONLY when auth is ready and user is null
+  // This effect runs AFTER onAuthStateChanged has determined there's no user
   useEffect(() => {
+    // Don't do anything until auth state is determined
     if (!authReady) return;
-    if (user) {
-      // Reset flags when user signs in successfully
-      forceSignInStartedRef.current = false;
-      checkingRedirectRef.current = false;
-      return;
-    }
-    if (forceSignInStartedRef.current) return;
     
-    // Check if we're in the middle of a redirect (URL might have auth params)
+    // If user exists, reset redirect flag and don't trigger sign-in
+    if (user) {
+      redirectTriggeredRef.current = false;
+      return;
+    }
+    
+    // If we already triggered a redirect, don't trigger again
+    if (redirectTriggeredRef.current) {
+      console.log('Redirect already triggered, waiting...');
+      return;
+    }
+    
+    // Check if we're returning from a redirect (URL has auth params)
     const urlParams = new URLSearchParams(window.location.search);
-    if (urlParams.has('apiKey') || window.location.hash.includes('auth')) {
-      // We're processing a redirect, don't trigger another one
+    const hasAuthParams = urlParams.has('apiKey') || 
+                          window.location.hash.includes('auth') ||
+                          window.location.search.includes('__firebase');
+    
+    if (hasAuthParams) {
+      console.log('Detected redirect return, waiting for auth state...');
       return;
     }
 
-    // Small delay to ensure redirect check completes
-    const timeoutId = setTimeout(() => {
-      if (user) return; // Double-check user didn't sign in during delay
-      forceSignInStartedRef.current = true;
-      signInWithRedirect(auth, googleProvider).catch((e) => {
-        console.error('Sign-in redirect error:', e);
-        setAuthError(e?.message ?? 'Authentication failed.');
-        forceSignInStartedRef.current = false; // Reset on error so user can retry
-      });
-    }, 500);
-
-    return () => clearTimeout(timeoutId);
+    // All checks passed - trigger redirect sign-in ONCE
+    console.log('No user found, triggering redirect sign-in...');
+    redirectTriggeredRef.current = true;
+    signInWithRedirect(auth, googleProvider).catch((e) => {
+      console.error('Sign-in redirect error:', e);
+      setAuthError(e?.message ?? 'Authentication failed.');
+      redirectTriggeredRef.current = false; // Reset on error so user can retry
+    });
   }, [authReady, user]);
 
   const previousWorkout = useMemo(() => {
