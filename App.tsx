@@ -245,7 +245,7 @@ const App: React.FC = () => {
         totalVolume,
         rating: sessionRating,
       };
-
+      console.log('Updating session:', updatedSession);
       await cloudDb.updateSession(user.uid, updatedSession);
       setActiveTab('history');
       resetLogForm();
